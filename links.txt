@@ -1,0 +1,3 @@
+https://www.mongodb.com/products/platform/atlas-vector-search
+
+https://www.mongodb.com/library/vector-search/semantic-search-mongodb-using-atlas-vector-search?lb-mode=overlay
