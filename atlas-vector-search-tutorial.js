@@ -2,6 +2,10 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const { MongoClient } = require("mongodb");
 require('dotenv').config();
+const { OpenAIEmbeddings, ChatOpenAI } = require('@langchain/openai');
+const { MongoDBAtlasVectorSearch } = require('@langchain/community/vectorstores/mongodb_atlas');
+
+
 
 // Assuming fetch is globally available or imported as needed
 // const fetch = ...
@@ -10,6 +14,9 @@ const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri);
 const app = express();
 const port = 5001; // or any other port you prefer
+const dbName = "sample_mflix";
+const collectionName = "embedded_movies";
+const apiKey = process.env.OPEN_AI_KEY;
 
 app.use(bodyParser.json());
 
@@ -22,9 +29,9 @@ async function run(queryString) {
     await client.connect();
 
     // set namespace
-    const database = client.db("sample_mflix");const { EJSON } = require('mongodb');
+    const database = client.db(dbName);
 
-    const coll = database.collection("embedded_movies");
+    const coll = database.collection(collectionName);
 
     // define pipeline
     const agg = [
@@ -90,7 +97,7 @@ async function getEmbeddings(inputString){
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${process.env.OPEN_AI_KEY}`,
+            'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -129,6 +136,92 @@ app.post('/getResults', async (req, res) => {
   }
 });
 
+
+app.post('/retrieve', async (req, res) => {
+  try {
+    await client.connect();
+    const collection = client.db(dbName).collection(collectionName);
+
+    const question = req.body.question;
+    console.log("Displaying question:", question)
+    const vectorStore = new MongoDBAtlasVectorSearch(
+      new OpenAIEmbeddings({
+        openAIApiKey: apiKey,
+        modelName: 'text-embedding-ada-002',
+        stripNewLines: true,
+      }), {
+      collection,
+      indexName: "vector-search-tutorial",
+      textKey: "plot", 
+      embeddingKey: "plot_embedding",
+    });
+
+    const retriever = vectorStore.asRetriever({
+      searchType: "mmr",
+      searchKwargs: {
+        fetchK: 20,
+        lambda: 0.1,
+      },
+    });
+
+    const retrieverOutput = await retriever.getRelevantDocuments(question);
+    await client.close();
+    res.json(retrieverOutput);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Internal Server Error');
+  } finally {
+    await client.close();
+  }
+});
+
+app.post('/chat-response', async (req, res) => {
+  try {
+      const { messages } = req.body;
+      const currentMessageContent = messages[messages.length - 1].content;
+
+      if (!Array.isArray(messages)) {
+        return res.status(400).send({ error: 'messages must be an array' });
+    }
+
+      // Fetch vector search results
+      const vectorSearch = await fetch("http://localhost:5001/retrieve", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ question: currentMessageContent }),
+        }).then(res => res.json());
+
+      const TEMPLATE = `You are a movie enthusiast helping people answer basic questions about these movies presented. If you are unsure and the answer is not explicitly written in the documentation, say "Sorry, I don't know how to help with that."
+
+      Context sections:
+      ${JSON.stringify(vectorSearch)}
+
+      Question: """
+      ${currentMessageContent}
+      """
+      `;
+
+      const llm = new ChatOpenAI({
+          openAIApiKey: apiKey,
+          modelName: "gpt-3.5-turbo",
+          streaming: false, // Set to true if streaming is desired
+      });
+
+      // Call the ChatOpenAI model
+      const response = await llm.invoke(TEMPLATE);
+      
+      // Send the response back
+      res.json({ response });
+  } catch (error) {
+      console.error("Error in /chat-response:", error);
+      res.status(500).send('Internal Server Error');
+  }
+});
+
+
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
+
